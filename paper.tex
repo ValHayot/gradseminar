@@ -1,0 +1,99 @@
+\documentclass{report}                                                           
+        
+\usepackage{titlesec}
+\titleformat{\chapter}
+  {\normalfont\LARGE\bfseries}{\thechapter}{1em}{}
+\titlespacing*{\chapter}{0pt}{3.5ex plus 1ex minus .2ex}{2.3ex plus .2ex}
+\usepackage[left=1in, right=1in, top=1in, bottom=1in]{geometry}
+\usepackage{hyperref} 
+\usepackage{xcolor} 
+\usepackage{ulem}                     
+\usepackage{graphicx} 
+\usepackage{rotating}
+\usepackage{setspace}
+\usepackage{longtable}
+\usepackage[acronym]{glossaries}
+                                                                                 
+\newcommand{\note}[1]{\textcolor{blue}{\textit{note}: #1}}                       
+\newcommand{\tristan}[1]{\textcolor{red}{TG: #1}}                                
+\newcommand{\weird}[1]{\uwave{#1}}  
+
+\newacronym{hpc}{HPC}{High Performance Computing}
+\newglossaryentry{mpc}{
+    name = $M_{pc}$ ,
+  description = The makespan with page cache,
+}
+
+
+% Fix link colors
+\hypersetup{
+    colorlinks = true,
+    linkcolor=red,
+    citecolor=red,
+    urlcolor=blue,
+    linktocpage % so that page numbers are clickable in toc
+}
+\setcounter{tocdepth}{1}
+
+\makeglossaries
+\begin{document} 
+    \begin{titlepage}
+       \begin{center}
+
+           \hspace{0pt}
+                \vfill
+                    \textbf{Porting Big Data optimizations to scientific workflows on HPC}
+                \vfill
+           \hspace{0pt}
+
+           \vspace{2cm}
+
+           \textbf{Valerie Hayot-Sasson}
+
+           \vfill
+
+           ENCS 8011: Graduate Seminar\\
+
+           \vspace{0.8cm}
+
+           Department of Software Engineering and Computer Science\\
+           Concordia University\\
+           \today
+
+       \end{center}
+    \end{titlepage}
+    
+    \spacing{1.5}
+    \begin{abstract}
+        With the growing rise in open scientific datasets, there is an increased
+        need in efficient data management strategies to offset the transfer-related
+        costs that may occur during processing on High Performance Computing (HPC)
+        environments. Big Data frameworks such as Hadoop MapReduce and Apache 
+        Spark have introduced and popularized two major data management strategies:
+        Data locality and In-memory computing. Although such frameworks are 
+        heavily used in industry, they remain seldom used in imaging analysis 
+        pipelines as they are not well-adapted for the processing of such 
+        datasets and are not designed to be executed on heterogeneous architecture 
+        such as HPC clusters. Furthermore, in the case of neuroimaging, our main 
+        use case, the processing of data relies on pre-existing command-line tools,
+        which would need to be rewritten in order to be adequately written using
+        the frameworks. However, we have found that data locality and in-memory
+        computing combined can bring up to a 5x speedup to neuroimaging workflows.
+
+        Here we present progress on Sea, a hierarchical filesystem leveraging 
+        libc interception to enable optimized data placement strategies for 
+        scientific workflows running on HPC clusters. Implementation details and
+        an evaluation of the designed performance model will be discussed.
+        
+         
+    \end{abstract} 
+    \printglossary[title=List of Symbols]
+    \printglossary[type=\acronymtype,title=List of Abbreviations]
+    \tableofcontents
+
+    \chapter{Introduction}
+    \chapter{Background}
+    \chapter{Recent Research Activities}
+    \chapter{Conclusions and Future work}
+
+\end{document}
