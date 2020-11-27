@@ -19,6 +19,7 @@
 \usepackage{algorithm}
 \usepackage{algorithmicx}
 \usepackage{algpseudocode}
+\usepackage{pgfgantt}
 \algnewcommand\algorithmicforeach{\textbf{for each}}
 \algdef{S}[FOR]{ForEach}[1]{\algorithmicforeach\ #1\ \algorithmicdo}
 \algblock{Input}{EndInput}
@@ -93,14 +94,14 @@
     \begin{abstract}
         With the growing rise in open scientific datasets, there is an increased
         need in efficient data management strategies to offset the transfer-related
-        costs that may occur during processing on \gls{hpc}
+        costs that may occur during processing on HPC
         environments. Big Data frameworks such as Hadoop MapReduce and Apache 
         Spark have introduced and popularized two major data management strategies:
         Data locality and In-memory computing. Although such frameworks are 
         heavily used in industry, they remain seldom used in imaging analysis 
         pipelines as they are not well-adapted for the processing of such 
         datasets and are not designed to be executed on heterogeneous architecture 
-        such as \gls{hpc} clusters. Furthermore, in the case of neuroimaging, our main 
+        such as HPC clusters. Furthermore, in the case of neuroimaging, our main 
         use case, the processing of data relies on pre-existing command-line tools,
         which would need to be rewritten in order to be adequately written using
         the frameworks. However, we have found that data locality and in-memory
@@ -108,7 +109,7 @@
 
         Here we present progress on Sea, a hierarchical filesystem leveraging 
         libc interception to enable optimized data placement strategies for 
-        scientific workflows running on \gls{hpc} clusters. Implementation details and
+        scientific workflows running on HPC clusters. Implementation details and
         an evaluation of the designed performance model will be discussed.
         
          
@@ -119,33 +120,158 @@
 
     \chapter{Introduction}
 
-    The cost data transfers rises with the increase in dataset size. While these costs
-    have previously been neglected in scientific computing, where applications had
-    notoriously been compute intensive, there are becoming a sign
+    The costs of data transfers
+    have previously been neglected in scientific computing, however, they are becoming significant
+    due to recent increases in dataset size~\cite{vanhorn2014}. For instance, in neuroimaging,
+    our domain of interest, dataset sizes have increased due to improvements in data sharing and open science, as
+    well as improved data acquisition techniques. Notable examples include the Human Connectome
+    Project (HCP)~\cite{hcp} which is expected to reach up to \SI{1}{\peta\byte}, the UK Biobank~\cite{ukbio} which is
+    expected to surpass \SI{0.2}{\peta\byte}, and the BigBrain~\cite{bigbrain}, a one-of-a-kind \SI{20}{\micro\meter}
+    histological image of the human brain that reaches approximately \SI{603}{\giga\byte} in size.
+    This thesis aims to develop tools to facilitate the processing of such large datasets.
+    We will begin by evaluating the relevance of data transfer optimizations brought forward by other
+    domains to scientific computing. We will then proceed to design and develop a lightweight
+    filesystem that implements data transfer optimizations. Finally, we will work on a scheduler
+    that will further optimize the filesystem logic and improve overall application performance.
     
-    \chapter{Background}
-        \section{Big Data optimizations}
-            \subsection{Data locality}
-            \subsection{In-memory computing}
-        \section{Scientific pipeline engines}
-        \section{HPC infrastructure}
-            \subsection{Architecture}
-            \subsection{Scheduling}
-            \subsection{Parallel file systems}
-            \subsection{Burst buffers}
-        \section{The Linux Page Cache}
-        \section{User-space file systems}
-            \subsection{FUSE}
-            \subsection{libc interception}
-            \subsection{System call interception}
+    Strategies to facilitate the processing of such large datasets is required. In text-based
+    processing, frameworks such as MapReduce~\cite{mapreduce} and Apache Spark~\cite{spark}
+    have implemented and popularized strategies to minimize the need for data transfers during processing.
+    These strategies are known as data locality and in-memory computing.
 
+    Data locality is the process by which compute tasks are scheduled nearest to where
+    the data is located. Traditionally, storage and compute were kept separate,
+    having to transfer data over the network to compute. Rather than having to transfer large amounts of data over the
+    network to the compute tasks, which could incur significant overheads, Big Data frameworks ensure that data is
+    stored directly on the compute nodes. When a compute task requires access to specific
+    data, the scheduler sends the task to the nearest available node to the data, thereby
+    minimizing any cost of network-related data transfers. This strategy is not only
+    used by Big Data Frameworks such as Hadoop MapReduce, Apache Spark, and Dask~\cite{dask},
+    but also enabled by file systems such as the Hadoop Distributed File System (HDFS)~\cite{hdfs}
+    and Alluxio~\cite{alluxio}.
+
+
+    In-memory computing is the process by which intermediate data is maintained in memory whenever possible.
+    We consider intermediate data to be any data which has previously been ingested by the application.
+    Memory is the fastest available storage to the application, therefore, it is preferable to maintain 
+    processed data in-memory rather than materializing it to a slower storage device. While memory is
+    volatile and data loss on a failed node can happen, Big Data frameworks that leverage in-memory
+    computing, such as Spark and Dask, rely on task lineage to reproduce lost data. Should memory
+    space be insufficient to maintain all data in memory, application data can be materialized to
+    disk, at worst incurring the same overheads that an application solely writing to disk
+    would.
+
+    Although there have been some efforts to apply Big Data frameworks to scientific
+    computing~\cite{kira, thunder}, such frameworks have largely been underutilized.
+    There are a few reasons that may explain this. In ~\cite{mehta2017}, it was found
+    that such Big Data frameworks were not well adapted to process imaging data.
+    In domains such as neuroimaging, pipelines consist of a chain of widely-used and well-established
+    command line tools (CLIs) (e.g. FSL~\cite{fsl}, ANTs~\cite{ants}, FreeSurfer~\cite{freesurfer}).
+    These tools rely on POSIX-calls to access data, and cannot be transferred data in the
+    form of framework objects, thereby inevitably bypassing most data transfer optimizations
+    provided by Big Data frameworks. These applications would therefore need to be reinstrumented
+    to work with such frameworks.
+
+    There exists many frameworks for scientific computing,
+    such as Nipype~\cite{nipype}, Pegasus~\cite{pegasus}, Nextflow~\cite{nextflow} and Taverna~\cite{taverna}.
+    Rather than focusing on data transfer optimizations, they specialize in addressing
+    other issues prominently found in scientific computing: ease-of-use, provenance
+    tracking, parallelization and portability. These frameworks are also well-adapted to
+    run on the computing infrastructure primarily used by the scientific community:
+    High Performance Computing (HPC) clusters.
+
+
+    The general structure of HPC clusters may complicate the deployment of Big Data frameworks.
+    Typical HPC clusters consist of distinct storage and compute nodes. While the compute
+    nodes may also have local storage, there is no distributed file system like HDFS or
+    Alluxio to facilitate data locality. Furthermore, access to these compute nodes is
+    temporary, with allocation duration enforced by a batch scheduler. Therefore, any
+    data written to a compute node is inaccessible after the allocation is terminated.
+
+    The resource allocation mechanism may also pose a challenge to Big Data applications.
+    Batch schedulers such as Slurm~\cite{slurm} and PBS~\cite{pbs} 
+    are priority-based, requiring that not only all required resources are available,
+    but also that the user has satisfied the priority requirements. This may leave
+    Big Data application pending on the resource allocation queue for significant amounts
+    of time. However, certain HPC clusters may utilize schedulers like Condor~\cite{condor}
+    and DIRAC~\cite{dirac} which enable dynamic provisioning of resources through pilot-scheduling.
+    Such an approach may be favourable to Big Data frameworks as it would enable to processing
+    of tasks prior to the allocation of all requested resources.
+
+    The storage layer found on HPC clusters consists of a high-performance parallel 
+    distributed file system such as Lustre~\cite{lustre}. This file system is made 
+    accessible to every compute node within the cluster, connected to each node via
+    high-performance network interconnect such as InfiniBand~\cite{infiniband}. Although 
+    it is a high performance network, it nevertheless can be a source of bottlenecks as 
+    the network is shared between all users on the cluster. Furthermore, there are
+    additional overheads that can be incurred. In the case of Lustre,
+    there are many data nodes, known as Object Storage Servers (OSS) which contain
+    several storage devices, known as Object Storage Targets (OST). All file metadata
+    is maintained within a separate node known as the Metadata Server (MDS) and stored within
+    a device referred to as the Metadata Target (MDT). Although data transfers can be
+    communicated directly to the corresponding OST, the clients need to first communicate
+    with the MDS to determine which OST to communicate with. This can result
+    in data transfer overheads, particularly when making numerous requests to the metadata server.
+    Occasionally, HPC clusters provide a faster intermediate storage layer, known as a Burst Buffer,
+    which can improve the overall performance of I/O operations to Lustre.
+
+
+    While scientific applications uncommonly use Big Data frameworks and must perform
+    large over-the-network data transfers, they may still benefit from in-memory
+    computing and data locality through the Linux Page Cache~\cite{pagecache}. Similarly to other
+    filesystems, Lustre leverages the client node page cache to reduce I/O overheads.
+    System memory is composed of two components: 1) anonymous memory and 2) page cache.
+    Anonymous memory consists of all application-related objects, whereas page cache
+    consists of recently accessed file data. When a file is read, that file is loaded
+    up into the page cache to be flagged for eviction based on a least recently used (LRU)
+    policy. That means subsequent accesses to that data may be done entirely
+    in memory so long as that data has not already been evicted. Similarly, for writes
+    to a file system with writeback cache enable, the file will be written to memory
+    completing the write operation once the file has been written entirely to memory.
+    That file will then be flushed asynchronously to the appropriate storage device.
+    As system memory may get overloaded with too many write requests, there is a limit to the amount of written data that
+    can exist in memory, known as the \texttt{dirtyi\_ratio}. Furthermore, applications
+    producing too many write requests may be throttled by the system.
+
+
+    Due to the architecture of conventional HPC clusters, network based parallel
+    files systems are favoured over Big Data distributed filesystems. Such filesystems
+    require super user access, preventing users from deploying their own own on-the-fly cluster.
+    While HDFS can be loaded in user-space by mounting its File System in Userspace (FUSE) implementation,
+    FUSE-based filesystems can perform significantly worse than desired, depending on the application~\cite{tofuse}.
+    Even with a userspace version of HDFS, there would
+    be no mechanism to transfer all the data back to the parallel filesystem to be accessible
+    post resource requests. Furthermore, such filesystems are not POSIX-compliant, which
+    would be required for scientific computing applications.
+
+    There are, however, BigData filesystems, such as XtreemFS~\cite{xtreemfs} that
+    exist entirely within user space, are POSIX-compliant, and can use alternative
+    methods to FUSE to function. XtreemFS leverages libc interception using the LD\_PRELOAD
+    trick to intercept filesystem calls made to the libc library. There are
+    limitations to using libc interception, such as there needs to be libc call to intercept and the 
+    application making the calls must be dynamically linked.
+    There are alternatives to libc intercept that can bypass these issues, such as
+    system call interception, but they have greater overheads as compared to libc interception~\cite{quinson}.
+    Furthermore, most applications are dynamically linked and use libc to interact
+    with the filesystem. Characteristics that make XtreemFS unlikely to be deployed
+    on-the-fly include complex filesytem deployment and configuration properties. It
+    also does not provide a simple way to leverage different classes of storage
+    devices, nor ensure that required data will be copied to the cluster's parallel file system.
+
+    In this seminar we will discuss my ongoing work to create a lightweight on-the-fly filesystem
+    called Sea that leverages the storage device hierarchy. In Chapter~\ref{chp:eval}, we
+    will investigate the relevance of Big Data strategies to scientific computing. Chapter~\ref{chp:sea}
+    will go over the implementation details and current performance results obtained with Sea. We will
+    then conclude in Chapter~\ref{chp:conclusion} with a discussion on future work and thesis timelines.
+
+    
     \chapter{Evaluation of Big Data optimizations on HPC}\label{chp:eval}
 
         Before developing any new software for data management, we need to
         determine if the proposed strategies are beneficial to scientific computing.
         Should these strategies be beneficial to scientific computing, we should try
-        to develop strategies to better adapt them to \gls{hpc} environments. Furthermore,
-        other hardware to improve performance of Big Data applications on \gls{hpc}
+        to develop strategies to better adapt them to HPC environments. Furthermore,
+        other hardware to improve performance of Big Data applications on HPC
         should also be investigated.
 
         In this section, we will go over three of my published works evaluating existing
@@ -154,8 +280,10 @@
         performance (Algorithm~\ref{alg:incrementation}). Section~\ref{section:ccgrid2019} will provide a summary of my
         paper titled, \textit{Performance Evaluation of Big Data Processing Strategies for Neuroimaging}
         published at CCGrid in 2019. Section~\ref{section:escience2019} will provide
-        a summary of my paper titled \textit{Evaluation of pilot jobs for Apache Spark applications on HPC clusters}. We will conclude with my third paper titled,
-        \textit{Performance benefits of Intel® Optane™ DC persistent memory for the parallel processing of large neuroimaging data}, in Section~\ref{section:ccgrid2020}.
+        a summary of my paper titled \textit{Evaluation of pilot jobs for Apache Spark applications on HPC clusters} published at
+        e-Science 2019. We will conclude with my third paper titled,
+        \textit{Performance benefits of Intel® Optane™ DC persistent memory for the parallel processing of large neuroimaging data}
+        published at CCGrid 2020, in Section~\ref{section:ccgrid2020}.
 
             \begin{algorithm}\caption{Incrementation}\label{alg:incrementation}
             \begin{algorithmic}[1]
@@ -209,7 +337,7 @@
         Algorithm~\ref{alg:incrementation} and applied in on a \SI{13}{\mega\byte}
         T1W image from OpenNeuro~\cite{openneuro} and the partial
         and full \SI{76}{\gibi\byte}{BigBrain} image. All experiments were conducted
-        on Dell EMC's Zenith cluster~\cite{zenith} using node-local tmpfs, SSD,
+        on Dell EMC's Zenith cluster using node-local tmpfs, SSD,
         and their Lustre server for storage.
 
         For our experiments, we varied the number of iterations (1, 10, 100),
@@ -238,17 +366,17 @@
 
         \section{Pilot scheduling for Spark on HPC}\label{section:escience2019}
 
-        \gls{hpc} clusters typically rely on batch provisioning schedulers (e.g. SLURM, PBS)
+        HPC clusters typically rely on batch provisioning schedulers (e.g. SLURM, PBS)
         to allocate resources. When a user requests a resource allocation, their jobs
         are placed in a priority queue based on previous cluster usage, current resource
-        requirements and overall node availability. For typical \gls{hpc} applications,
+        requirements and overall node availability. For typical HPC applications,
         this is not a problem. However, Big Data applications would rely on significant
         amounts of resource requirements and may end up waiting on the resource allocation
         queue for a significant amount of time. In this case, pilot scheduling, which
-        would enable dynamic provisioning of Spark clusters on \gls{hpc} may significantly
+        would enable dynamic provisioning of Spark clusters on HPC may significantly
         reduce batch scheduler queue time. In this paper, we designed and implemented
         a library called \texttt{Spa} that would streamline the dynamic provisioning of
-        Spark clusters on \gls{hpc} infrastructure and evaluated the makespan differences
+        Spark clusters on HPC infrastructure and evaluated the makespan differences
         (including queueing time) between typical batch provisioning and 
         dynamic pilot provisioning. In addition we devised a model to
         describe the relation between makespan and number of pilots.
@@ -264,7 +392,7 @@
             W = \frac{1}{M}\int_0^M{w(t)dt}
         \end{equation}
 
-        To evaluate the two strategies, we used two Compute Canada \gls{hpc} clusters: 
+        To evaluate the two strategies, we used two Compute Canada HPC clusters: 
         Cedar and B\'eluga. The pilot scheduler was configured to generate either 8 or 16 pilots.
         Batch, in contrast, consisted of a single resource request containing all
         required application resources.
@@ -287,8 +415,8 @@
 
 
         While there have been software advances to the reduction of data transfer times
-        on \gls{hpc} systems, there have also been hardware advances. One of such 
-        hardware advances is the Intel Optane DC Persistent Memory, which is a 
+        on HPC systems, there have also been hardware advances. One of such 
+        hardware advances is the Intel Optane DC Persistent Memory~\cite{optane}, which is a 
         cost-effective solution to increasing available memory for use with Big Data
         applications. In this paper, we evaluate the effectiveness of using
         Intel Optane DC Persistent Memory for Big Data scientific applications.
@@ -339,23 +467,21 @@
 
 
 
-    \chapter{The Sea filesystem}
+        \chapter{The Sea filesystem}\label{chp:sea}
     \section{Introduction}
     In previous chapters, we discussed that while data-intensive scientific 
     applications may gain significant speedups from leveraging Big Data optimizations,
     they must be reimplemented for use with Big Data frameworks. Furthermore, Big Data
-    frameworks are not well suited for execution on \gls{hpc} systems where the 
-    communication between workers can only be achieved through the use of overlay
-    clusters.
+    frameworks are not well suited for execution on HPC systems where allocation of the
+    cluster must be done using a batch scheduling system.
 
-    We have also addressed alternative ways to obtain data-related performance speedups on \gls{hpc}
-    using either burst buffers, Optane technology or Big Data filesystems such as \gls{hdfs}
-    or Alluxio. While these solutions do reduce the cost of data transfers, they incur
+    We have also addressed alternative ways to obtain data-related performance speedups on HPC
+    using Optane technology or Big Data filesystems. While these solutions do reduce the cost of data transfers, they incur
     a learning overhead for users and may require the purchasing of additional infrastructure and
     adoption by system administrators.
 
     In addition to existing solutions, there is a third alternative to bringing data
-    locality and in-memory computing to scientific applications running on \gls{hpc}
+    locality and in-memory computing to scientific applications running on HPC
     without requiring system administrator intervention nor the reinstrumentation
     of existing scientific applications. This may come in the form of a user-space 
     on-the-fly tiered file system. In this chapter we introduce Sea, a volatile user-space file
@@ -365,18 +491,19 @@
     The goals of Sea are as follows:
     \spacing{0.5}
     \begin{enumerate}
-            \item make efficient use of available storage devices to minimize data
+            \item Make efficient use of available storage devices to minimize data
                 transfer costs
-            \item adapt to changes in storage bandwidth due to device use
-            \item exist entirely in user space
-            \item function without application reinstrumentation
+            \item Adapt to changes in storage bandwidth due to device use
+            \item Exist entirely in user space
+            \item Function without application reinstrumentation
             \item Exist exclusively for the duration of a single application
     \end{enumerate}
 
-    \note{mention that the code is open-source, provide link, etc}
     \spacing{1.5}
    Sea will enable users to leverage its performance optimizations without intervention
    from system administrators nor specific understanding of the underlying infrastructure.
+   All code, experiments and benchmarks pertaining to Sea are available online at
+   \href{https://github.com/big-data-lab-team/sea}{https://github.com/big-data-lab-team/sea}
    In this chapter we will discuss the ongoing work that has been put into the development
    of Sea. Section~\ref{design} will present the design decisions that went into the
    implementation of Sea. In Section~\ref{model}, we will go over a Lustre and Sea
@@ -386,7 +513,12 @@
    in Section~\ref{results} and conclude with a discussion in Section~\ref{discussion}.
     
    \section{Design}\label{design}
-   Sea aims to provide speedups to scientific applications running on \gls{hpc}
+    \begin{figure}
+            \centering
+            \includegraphics[width=0.8\linewidth]{figures/seadesign.pdf}
+            \caption{Sea design overview}
+    \end{figure}%
+   Sea aims to provide speedups to scientific applications running on HPC
    by redirecting application intermediate data to compute-local storage (e.g. tmpfs,
    SSD, HDD), whenever possible.
    To do so effectively, it must make sure to do so with a minimal overhead, such as
@@ -399,13 +531,11 @@
    the intermediate data on permanent storage as the belief is that it is generally 
    more costly to store the data than to recompute it at a later time. Nevertheless,
    they do provide the ability to persist data to disk, particularly when the 
-   costs of recomputation outweigh that of storing the data. Even if scientific application
+   costs of recomputation outweighs that of storing the data. Even if scientific application
    tasks could easily be recomputed, some tasks leverage randomization which would make
    it difficult to reproduce with recomputation unless the seed was fixed. Therefore,
    Sea must enable users the ability to materialize all necessary data to the parallel
    file system without incurring significant overheads during transfer to slower storage.
-
-   \note{talk about the design\ldots mountpoint etc}
 
    In this section, we will discuss the design that went into Sea.
    Subsection~\ref{subs:assumption} will discuss the assumptions that were made
@@ -418,7 +548,7 @@
    \subsection{Assumptions}\label{subs:assumption}
 
    Sea makes certain assumptions in order to achieve proper functioning. For Sea to
-   work at all, it must be used in a Linux environment. Since most \gls{hpc} clusters
+   work at all, it must be used in a Linux environment. Since most HPC clusters
    use Linux distributions, it is not believed to be a major limitation of Sea. We test
    the proper functioning of Sea over various Linux distributions through continuous
    integration. Sea is currently compatible for use with Centos 6 through 8, Fedora 32
@@ -440,7 +570,7 @@
     system, we estimate that the maximum speedup obtained will be the difference in
     compute time. That is to say, given that there is not reduction in I/O to Lustre,
     all we can gain from using Sea is asynchronous writes to Lustre occurring during
-    application compute.
+    application compute time.
 
    \subsection{libc interception}\label{subs:libcintersection}
 
@@ -448,15 +578,14 @@
    performing system call interception, we have decided to leverage libc interception
    for Sea. Adapting the passthrough used in Xtreemfs, we intercept over 100 libc functions.
    The libc functions intercepted by Sea are those that either accept as input a path
-   or a pointer to a path.
+   or a pointer to a path such as \texttt{open}, \texttt{close}, \texttt{read} and \texttt{write}.
 
    After intercepting the call, Sea must determine if the path provided is within the
    Sea mount point. If so, Sea needs to determine the actual location of the file 
    that is being referenced. If a file needs to be created, Sea will travel
    down the storage hierarchy to determine the most efficient filesystem with sufficient
-   available space to write to. Filesystems of the same storage layer are randomized in
-   order to enable parallel file creation to the same storage layer in the event
-   that application tasks need to create files concurrently. If a file already
+   available space to write to. Filesystems of the same storage level are randomized in
+   order to enable parallel file creation to a storage level. If a file already
    exists and needs to be accesses, Sea will traverse through
    the hierarchy looking for the actual path to the file. Directories are created
    in all filesystems existing within Sea's hierarchy. This ensures that there are
@@ -466,8 +595,8 @@
 
    \subsection{Configuration}\label{subs:configuration}
    Users must specify their desired configuration in a \texttt{ini} file for the
-   proper functioning of Sea. Theses configuration parameters consist of 1) the
-   mount point, 2) the number of storage layers and their paths, 3) the log level and
+   proper functioning of Sea. These configuration parameters consist of 1) the
+   mount point, 2) the number of storage levels and the storage paths, 3) the log level and
    the logfile path, and 4) the maximum size of a file created by the application and
    the maximum number of concurrent threads.
 
@@ -478,25 +607,17 @@
    must be converted to its actual path before forwarding the call to libc.
 
 
-   The storage layers each indicate a performance level within the hierarchy. For
+   The storage level each correspond to a performance level within the hierarchy. For
    instance, at the top-level, one might consider to place tmpfs devices. In another level,
    local SSDs can be found, with local HDDs in a third, slower level. We expect that the
    final level will typically be a network-based parallel file system, as would be the case
-   on \gls{hpc}, however, any kind of file system can be placed there. It is just important
+   on HPC, however, any kind of file system can be placed there. It is just important
    to note that there can be only a single file system in the last layer, and in the event
    of flushing and eviction, all application outputs will be written to that file system.
    For all other storage layers, multiple filesystems can be specified in the same
    layer using a comma separated list.
 
-   Sea provides five different levels of logging (\texttt{debug}, \texttt{info},
-   \texttt{warning}, \texttt{error} and \texttt{none}).
-   Logging can occur in the foreground or be saved to a file. Due to the sheer number
-   of times libc functions can be called, particularly withing a data intensive workflow,
-   it is generally preferable to limit the amount of logging (e.g. \texttt{error} or
-   \texttt{none}) to not impede Sea's performance.
-
-
-   Sea leverage the maximum application file size and number of concurrent threads
+   Sea leverages knowledge on the maximum application file size and number of concurrent threads
    to determine the amount of space required on a filesystem before selecting it for
    a write. In other words, if there is insufficient space on a filesystem for
    $n$ concurrent threads to each write a file of size $x$, this system will not be
@@ -559,8 +680,8 @@
      $B_{lr}$ & Perceived Lustre read bandwidth & Eq.~\ref{eq:lustrenpc}, \ref{eq:blr}, \ref{eq:lustrepc}, \ref{eq:sea}, \ref{eq:msl}, \ref{eq:msc}\\
      $B_{lw}$ & Perceived Lustre write bandwidth & Eq.~\ref{eq:lustrenpc}, \ref{eq:blw}, \ref{eq:msl}\\
      $B_{n}$ & Network bandwidth & Eq.~\ref{eq:blr}, \ref{eq:blw}\\
-     $B_{or}$ & Lustre \gls{ost} read bandwidth & Eq.~\ref{eq:blr}, \ref{eq:blw}\\
-     $B_{ow}$ & Lustre \gls{ost} write bandwidth & Eq.~\ref{eq:blr}, \ref{eq:blw}\\
+     $B_{or}$ & Lustre OST read bandwidth & Eq.~\ref{eq:blr}, \ref{eq:blw}\\
+     $B_{ow}$ & Lustre OST write bandwidth & Eq.~\ref{eq:blr}, \ref{eq:blw}\\
      $B_{mr}$ & Memory read bandwidth (same as for tmpfs) & Eq.\ref{eq:cache}, \ref{eq:mst}, \ref{eq:msc}\\
      $B_{mw}$ & Memory write bandwidth (same as for tmpfs) & Eq.~\ref{eq:cache}, \ref{eq:mst}, \ref{eq:msc}\\
      $B_{dr}$ & Local disk read bandwidth & Eq.~\ref{eq:msd}\\
@@ -587,9 +708,9 @@
     To effectively be able to predict in which scenarios Sea will provide speedup
     over the baseline solution, we require a model. Since different parallel file
     systems may operate differently, our baseline model will be based on Lustre which
-    is commonly used on \gls{hpc} infrastructure.
+    is commonly used on HPC infrastructure.
 
-    For our data intensive use cases, the makespan models for both Lustre and Sea can be broken
+    For data intensive use cases, the makespan models for both Lustre and Sea can be broken
     down into two components: The amount of time it takes read the data and the amount
     of time it takes to write the data. With more heterogeneous applications (some components 
     are compute intensive whereas others are data intensive), a third component, comprising
@@ -645,8 +766,8 @@ Lustre bandwidth read and write models can therefore be described as follows:
     For the sake of simplicity, the above models assume that the network bandwidth
     between the compute nodes and data nodes is the same. This, however, may not
     necessarily be the case. Furthermore, the model also assumes that each file can
-    only be located on a single \gls{ost}, meaning that the parallel bandwidth can at maximum be
-    as all \gls{ost}s combined, and as slow as the minimum number of compute threads
+    only be located on a single OST, meaning that the parallel bandwidth can at maximum be
+    as fast as all OSTs combined and as slow as the minimum number of compute threads
     reading and writing files.
 
     As with many file systems, page cache plays an important role in the speed of
@@ -654,7 +775,7 @@ Lustre bandwidth read and write models can therefore be described as follows:
     non-negligible given amount of memory available and the data accessed during the
     execution of the application, it is important to include it in our model. The makespan
     of an application I/O to and from page cache can be described as the following:
-    Equation~\ref{eq:lustrenpc} where it is assumed that none of the data 
+    Equation~\ref{eq:lustrenpc} where it is assumed that none of the data is written or read from page cache.
 
 
     \begin{equation}\label{eq:cache}
@@ -790,28 +911,6 @@ Lustre bandwidth read and write models can therefore be described as follows:
     \end{equation}
 
     \section{Experiments}\label{exp}
-    To evaluate the Lustre and Sea models defined in Section~\ref{model} and the real
-    performance of both file systems with data intensive applications, we wrote a simple
-    Python application based off of Algorithm~\ref{alg:incrementation}. \note{will define alg with CCGrid paper}
-    Using this application, we can easily control how much intermediate data is produced
-    by altering the amount of iterations required. Although our model should be able
-    to support images of different sizes, we wanted to minimize any possible
-    scheduling effects from our experiments. Therefore, each application process
-    processes the same amount of input data and performs the same amount of computation.
-
-    As with the experiments performed in Chapter~\ref{chp:eval}, we will use the BigBrain
-    as a representative scientific datasets. For all our experiments, we utilize the
-    \SI{20}{\micro\meter} dataset, which totals to approximately \SI{603}{\gibi\byte}.
-    The dataset was broken down into 1000 files each consisting of \SI{617}{\mebi\byte}
-    of data. \note{technically 999 for now due to a bug}
-
-    We evaluate Sea using 4 different experimental conditions highlighted in Table~\ref{table:cond}:
-    1) varying the number of nodes, 2) varying the number of disks, 3) varying the number of threads and 4)
-    varying the number of iterations. Experimental condition 1 tests the effects
-    of increasing concurrent accesses to Lustre while fixing disk parallel threads. Condition 2
-    varies disk contention while fixing contention to Lustre, whereas 3 tests the effects
-    of contention on both Lustre and local storage. Experimental condition
-    4 varies the total amount of intermediate data produced by the application.
     
     \begin{table}
     \centering
@@ -850,42 +949,23 @@ Lustre bandwidth read and write models can therefore be described as follows:
     \label{table:cond}
     \end{table}
 
-    Since Sea remains a work in progress, we have removed the flushing functionality
-    from Sea in our benchmarks. Thus, no intermediate data should be read from or 
-    written to Lustre unless there is insufficient space on local drives \note{ensure
-    this is true or remove the paragraph}
-
-    \note{need to verify this entire paragraph}
-    Our experiments were executed on a Centos 8.1 (Linux kernel 4.18.0) cluster with 8 compute nodes,
-    4 data node Lustre server (2.13 branch) with 1 dedicated metadata node. Each compute node
-    is equipped it two Intel(R) Xeon(R) Gold 6130 CPUs, \SI{250}{\gibi\byte} of memory with
-    \SI{126}{\gibi\byte} of tmpfs space and 6 \SI{447}{\gibi\byte} SSDs set up using XFS \note{SSDSC2KG480G8R}.
-    The data nodes each contain 11 \SI{10}{\tera\byte} HDD \note{HGST HUH721010AL} \gls{ost}s
-    and \SI{62}{\gibi\byte} memory. The metadata server contains a MDT.
-    Jobs are scheduled on the cluster from a controller node using Slurm with cgroups. Swapping is
-    disabled.
-
-    Each file system was benchmarked using \texttt{dd}\note{link code} using 5 repetitions. The average bandwidths are
-    reported in Table~\ref{table:fs}
-
-    \note{redo??tmpfs write bandwidth seems off. mention network bandwidth}
     \begin{table}
     \centering
-    \begin{tabular}{@{}|c|c|c|c|@{}} 
+    \begin{tabular}{@{}|c|c|c|@{}} 
      \hline
-     Storage layer & Action & Average bandwidth (MiB/s) & Standard deviation (MiB/s) \\
+     Storage layer & Action & Average bandwidth (MiB/s) \\
      \hline
-     \multirow{3}{*}{tmpfs} & read & 6676.48 & 64.76 \\
-     & cached read & 6318.08 & 69.11 \\
-     & write & 199.70 & 1.70 \\
+     \multirow{3}{*}{tmpfs} & read & 6676.48 \\
+     & cached read & 6318.08  \\
+     & write & 2560.00 \\
      \hline
-     \multirow{3}{*}{local disk} & read & 501.70 & 3.30 \\
-     & cached read & 7034.88 & 647.72 \\
-     & write & 143.00 & 2.00 \\
+     \multirow{3}{*}{local disk} & read & 501.70  \\
+     & cached read & 7034.88 \\
+     & write & 426.00 \\
      \hline
-     \multirow{3}{*}{Lustre} & read & 1381.14 & 254.56 \\
-     & cached read & 6103.04 & 684.71 \\
-     & write & 121.00 & 1.70 \\
+     \multirow{3}{*}{Lustre} & read & 1381.14 \\
+     & cached read & 6103.04  \\
+     & write & 121.00  \\
 
      \hline
 
@@ -893,47 +973,42 @@ Lustre bandwidth read and write models can therefore be described as follows:
     \caption{Storage benchmarks}
     \label{table:fs}
     \end{table}
+    To evaluate the Lustre and Sea models defined in Section~\ref{model} and the real
+    performance of both file systems with data intensive applications, we wrote a simple
+    Python application based off of Algorithm~\ref{alg:incrementation}.
+    Using this application, we can easily control how much intermediate data is produced
+    by altering the amount of iterations required. Although our model should be able
+    to support images of different sizes, we wanted to minimize any possible
+    scheduling effects from our experiments. Therefore, each application
+    processes the same amount of input data and performs the same amount of computation.
 
+    As with the experiments performed in Chapter~\ref{chp:eval}, we will use the BigBrain
+    as a representative scientific datasets. For all our experiments, we utilize the
+    \SI{20}{\micro\meter} dataset, which totals to approximately \SI{603}{\gibi\byte}.
+    The dataset was broken down into 1000 files each consisting of \SI{617}{\mebi\byte}
+    of data.
 
+    We evaluate Sea using 4 different experimental conditions highlighted in Table~\ref{table:cond}:
+    1) varying the number of nodes, 2) varying the number of disks, 3) varying the number of threads and 4)
+    varying the number of iterations. Experimental condition 1 tests the effects
+    of increasing concurrent accesses to Lustre while fixing disk parallel threads. Condition 2
+    varies disk contention while fixing contention to Lustre, whereas 3 tests the effects
+    of contention on both Lustre and local storage. Experimental condition
+    4 varies the total amount of intermediate data produced by the application.
 
+    Our experiments were executed on a Centos 8.1 (Linux kernel 4.18.0) cluster with 8 compute nodes,
+    a 4 data node Lustre server with 1 dedicated metadata node. Each compute node
+    is equipped it two Intel(R) Xeon(R) Gold 6130 CPUs, \SI{250}{\gibi\byte} of memory with
+    \SI{126}{\gibi\byte} of tmpfs space and 6 \SI{447}{\gibi\byte} Intel SSDSC2KG480G8R SSDs.
+    The data nodes each contain 11 \SI{10}{\tera\byte} HGST HUH721010AL HDD OSTs
+    and \SI{62}{\gibi\byte} memory. The metadata server contains a Toshiba KPM5XVUG960G \SI{960}{\giga\byte} MDT.
+    The network bandwidth is \SI{25}{\giga\bit}E and uses tcp for communcation.
+    Jobs are scheduled on the cluster from a controller node using Slurm with cgroups. Swapping is
+    disabled.
 
-    
+    Each file system was benchmarked using \texttt{dd} using 5 repetitions. The average bandwidths are
+    reported in Table~\ref{table:fs}
 
-
-
-
-    \section{Results}\label{results}
-    \begin{figure}
-        \begin{subfigure}{0.5\textwidth}
-            \centering
-            \includegraphics[width=0.8\linewidth]{figures/nodes.pdf}
-            \caption{Experiment~\ref{exp:nodes}: Nodes}
-            \label{fig:nodes}
-        \end{subfigure}%
-        \begin{subfigure}{0.5\textwidth}
-            \centering
-            \includegraphics[width=0.8\linewidth]{figures/disks.pdf}
-            \caption{Experiment~\ref{exp:disks}: Disks}
-            \label{fig:disks}
-        \end{subfigure}
-        \begin{subfigure}{0.5\textwidth}
-            \centering
-            \includegraphics[width=0.8\linewidth]{figures/threads.pdf}
-            \caption{Experiment~\ref{exp:threads}: Threads}
-            \label{fig:threads}
-        \end{subfigure}
-        \begin{subfigure}{0.5\textwidth}
-            \centering
-            \includegraphics[width=0.8\linewidth]{figures/iterations.pdf}
-            \caption{Experiment~\ref{exp:iterations}: Iterations}
-            \label{fig:iterations}
-        \end{subfigure}
-        \caption{File system and model evaluation of Sea and Lustre. Shaded
-        area represents makespan range, as determined by the model, with the
-        lines representing the average of the bounds.}
-
-    \label{fig:seaexp}
-\end{figure}
     For the most part, the model appears to correctly encapsulate the
     performance range of Sea and Lustre, often times with the real data being
     situated at the halfway point between the min and max performance bounds.
@@ -965,10 +1040,42 @@ Lustre bandwidth read and write models can therefore be described as follows:
     time there was a noticeable decrease in performance occurred in Experiment~\ref{exp:disks}
     when the number of disks used was below 3. This is a result of there being
     a greater contention on local storage with a reduced number of disks. While
-    the local storage device bandwidths exceed that of Lustre \gls{ost}s (Table~\ref{table:fs}), Lustre has significantly more disks available that the overall
+    the local storage device bandwidths exceed that of Lustre OSTs (Table~\ref{table:fs}), Lustre has significantly more disks available that the overall
     attainable bandwidth is greater than that of local storage. Furthermore, 
     the network bandwidth to Lustre is also superior to the combined local
     storage bandwidth.
+    \section{Results}\label{results}
+    \begin{figure}
+        \begin{subfigure}{0.5\textwidth}
+            \centering
+            \includegraphics[width=0.8\linewidth]{figures/nodes.pdf}
+            \caption{Experiment~\ref{exp:nodes}: Nodes}
+            \label{fig:nodes}
+        \end{subfigure}%
+        \begin{subfigure}{0.5\textwidth}
+            \centering
+            \includegraphics[width=0.8\linewidth]{figures/disks.pdf}
+            \caption{Experiment~\ref{exp:disks}: Disks}
+            \label{fig:disks}
+        \end{subfigure}
+        \begin{subfigure}{0.5\textwidth}
+            \centering
+            \includegraphics[width=0.8\linewidth]{figures/threads.pdf}
+            \caption{Experiment~\ref{exp:threads}: Threads}
+            \label{fig:threads}
+        \end{subfigure}
+        \begin{subfigure}{0.5\textwidth}
+            \centering
+            \includegraphics[width=0.8\linewidth]{figures/iterations.pdf}
+            \caption{Experiment~\ref{exp:iterations}: Iterations}
+            \label{fig:iterations}
+        \end{subfigure}
+        \caption{File system and model evaluation of Sea and Lustre. Shaded
+        area represents makespan range, as determined by the model, with the
+        lines representing the average of the bounds. Note: y-axis scaling differs between experiments}
+
+    \label{fig:seaexp}
+\end{figure}
 
     \section{Discussion}\label{discussion}
 
@@ -991,9 +1098,9 @@ Lustre bandwidth read and write models can therefore be described as follows:
     SSD bandwidth estimation as the trend appears to be similar to real results.
     
     The model predictions for Experiment~\ref{exp:threads} may be off for Lustre as a result
-    of metadata contention. Whereas we have many \gls{ost}s and data nodes for
-    data storage, we only have a single disk dedicated to metadata storage (\gls{mdt}).
-    This normally would not have been a problem, except the \gls{mds} can only support
+    of metadata contention. Whereas we have many OSTs and data nodes for
+    data storage, we only have a single disk dedicated to metadata storage.
+    This normally would not have been a problem, except the MDS can only support
     32 threads at a time and at 8 concurrent threads per node, we reach this limit.
     The model, at the moment, does not consider latency for metadata requests, and 
     therefore, is unable to properly describe this behaviour.
@@ -1002,21 +1109,37 @@ Lustre bandwidth read and write models can therefore be described as follows:
     may arise from unaccounted for factors, such as compute time, which would otherwise
     be insignificant with a greater number of threads. What is interesting is perhaps
     the closeness in proximity that Sea's makespan is to Lustre's at a single thread.
-    There may be cache effects at play here as well, in the sense that 
-    \note{make stacked chart here..also wait for updated results}
+    There may be overheads caused by Sea's asynchronous flusher processes that are more
+    apparent with a single thread, particularly if the asynchronous flushing is occurring
+    from the same file system that is currently being read to. 
+
+    Sea's overheads may also explain the
+    model prediction errors found in Experiment~\ref{exp:iterations} when at a single iteration.
+    As all the data in both cases would end up on Lustre, it is normal that Sea would experience increased
+    overheads as there is are multiple layers of filesystems involved.
+
+    \chapter{Conclusions and Future work}\label{chp:conclusion}
+
+    While the preliminary results of Sea are promising, there still remains some work
+    to be done. We would like to integrate bandwidth estimation into Sea such that
+    Sea writes to the most efficient filesystem at the given point in time rather
+    than always referring to the hierarchy. Furthermore, we intend on improving the benchmarks with
+    repetitions to be able to account for system variability, in addition to measuring
+    the bandwidth of Sea with relevant Big Data neuroimaging applications. The expected
+    completion date of Sea will be towards the end of January/early February 2021.
+
+    After Sea, Sub my final project will commence. The goal of Sub is to simply be
+    a lightweight scheduler understand the full topology of the application data accesses. With
+    Sub, we will be able to inform Sea if data should be prefetched to local storage
+    and what data is no longer required by the application such that it can be flushed 
+    and evicted to the parallel file systems or removed entirely. We expect Sub to
+    be completed in July 2021. The expected defence date will be October 2021.
+    
+    \spacing{1}
+        \bibliographystyle{ieeetr}
+        \bibliography{bibliography}
 
 
 
-
-
-
-
-
-
-
-
-
-
-    \chapter{Conclusions and Future work}
 
 \end{document}
